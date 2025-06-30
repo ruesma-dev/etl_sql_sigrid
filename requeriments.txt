@@ -1,0 +1,4 @@
+# requirements.txt
+python-dotenv
+pyodbc
+psycopg2-binary
