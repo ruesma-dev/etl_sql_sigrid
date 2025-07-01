@@ -1,0 +1,23 @@
+2025-07-01 10:12:18,856  [INFO]  infrastructure.sql_gateway: Conectando a SQL Server localhost\MSSQLSERVER01 / base TemporaryDB…
+2025-07-01 10:12:18,918  [INFO]  infrastructure.sql_gateway: Conexión a SQL Server OK.
+2025-07-01 10:12:18,919  [INFO]  infrastructure.pg_gateway: Conectando a PostgreSQL db=sigrid_etl…
+2025-07-01 10:12:18,946  [INFO]  infrastructure.pg_gateway: Conexión a PostgreSQL OK.
+2025-07-01 10:12:18,946  [INFO]  application.pipeline: ▶ Diff hashes …
+2025-07-01 10:12:19,105  [INFO]  etl: Tabla auxhor sin cambios (hash idéntico).
+2025-07-01 10:12:19,113  [INFO]  etl: Tabla 'obrlba' existe pero está vacía.
+2025-07-01 10:12:19,139  [INFO]  etl: Tabla 'obrlbatar' existe pero está vacía.
+2025-07-01 10:12:19,147  [INFO]  etl: Tabla 'obrpas' existe pero está vacía.
+2025-07-01 10:12:19,155  [INFO]  etl: Tabla 'obrper' existe pero está vacía.
+2025-07-01 10:12:19,201  [INFO]  etl: Tabla res sin cambios (hash idéntico).
+2025-07-01 10:12:19,223  [INFO]  etl: Tabla age sin cambios (hash idéntico).
+2025-07-01 10:12:19,287  [INFO]  etl: Tabla emp sin cambios (hash idéntico).
+2025-07-01 10:12:19,500  [INFO]  etl: Tabla conext sin cambios (hash idéntico).
+2025-07-01 10:12:19,513  [INFO]  etl: Tabla defext sin cambios (hash idéntico).
+2025-07-01 10:12:19,614  [INFO]  etl: Tabla obrfasamb → 25314 filas pendientes.
+2025-07-01 10:12:19,642  [INFO]  etl: Tabla hmo → 6116 filas pendientes.
+2025-07-01 10:12:19,643  [INFO]  application.pipeline: ✓ Diff hashes
+2025-07-01 10:12:19,643  [INFO]  application.pipeline: ▶ Process chunks …
+2025-07-01 10:12:28,735  [INFO]  root: Convertidas columnas fecha: {'feccie': 'feccie', 'fec': 'fec', 'plafec': 'plafec', 'ofefecpre': 'ofefecpre'}
+2025-07-01 10:12:28,752  [INFO]  root: Columnas eliminadas: ['beoimpcal', 'coeficval', 'empide', 'placap', 'anuali', 'texofe', 'texest', 'beopor2', 'beoimp2', 'ofefecpre', 'ofeentide', 'riestr', 'rieval', 'totofe', 'tipofi', 'numedi', 'impsie']
+2025-07-01 10:12:28,753  [INFO]  root: Columnas ordenadas.
+2025-07-01 10:12:28,767  [INFO]  root: Eliminados caracteres NUL.
