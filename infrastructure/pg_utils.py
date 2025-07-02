@@ -1,140 +1,92 @@
-# infrastructure/pg_utils.py
 from __future__ import annotations
 
-import logging
-from typing import List
-
-import numpy as np
-import pandas as pd
-from sqlalchemy import (
-    MetaData,
-    Table,
-    Column,
-    Integer,
-    Float,
-    DateTime,
-    String,
-    Index,
-    inspect,
-    text,
-)
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+import io
+import csv
+from typing import List, Iterable
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
-logger = logging.getLogger(__name__)
 
-
-# ────────────────────────────────────────────────────────────────────────────
-def table_exists(inspector, table_name: str) -> bool:
+# ────────────────────────────────────────────────────────────────────
+# Helpers de IDENTIFICADORES
+# ────────────────────────────────────────────────────────────────────
+def quote_ident(ident: str) -> str:
     """
-    Devuelve True si la tabla existe en PostgreSQL.
-    `inspector` es una instancia de sqlalchemy.inspect(engine)
+    Devuelve el identificador escapado con comillas dobles sin requerir
+    una conexión psycopg2 (evitamos el TypeError que obtuviste).
+
+    Reglas mínimas de PostgreSQL:
+      • Se duplica cualquier comilla doble interna.
+      • Se envuelve todo en comillas dobles.
     """
-    return inspector.has_table(table_name)
+    return '"' + ident.replace('"', '""') + '"'
 
 
-# ────────────────────────────────────────────────────────────────────────────
-def create_table_with_pk(
-    engine: Engine, table_name: str, df: pd.DataFrame, pk_col: str
-) -> None:
-    """
-    Crea la tabla `table_name` con todas las columnas del DataFrame,
-    establece `pk_col` como PRIMARY KEY y añade la columna `hash_crc32`
-    con un índice auxiliar.
-    """
-    meta = MetaData()
-    columns: List[Column] = []
+# ────────────────────────────────────────────────────────────────────
+def table_exists(inspector, table: str) -> bool:
+    return inspector.has_table(table)
 
-    for col, dtype in df.dtypes.items():
-        if pd.api.types.is_integer_dtype(dtype):
-            col_type = Integer
-        elif pd.api.types.is_float_dtype(dtype):
-            col_type = Float
-        elif pd.api.types.is_datetime64_any_dtype(dtype):
-            col_type = DateTime
-        else:
-            col_type = String
 
-        kw = {"primary_key": True} if col == pk_col else {}
-        columns.append(Column(col, col_type, **kw))
-
-    # asegúrate de que existe la columna del hash
-    if "hash_crc32" not in df.columns:
-        columns.append(Column("hash_crc32", Integer))
-
-    table = Table(table_name, meta, *columns)
-    # solo crea si no existe
-    meta.create_all(engine, checkfirst=True)
-
+def create_table_with_pk(engine: Engine, table: str, df, pk: str) -> None:
+    cols_ddl = ", ".join(f"{quote_ident(c)} TEXT" for c in df.columns)
+    ddl = f"CREATE TABLE {quote_ident(table)} ({cols_ddl}, PRIMARY KEY ({quote_ident(pk)}))"
     with engine.begin() as conn:
-        idx = Index(f"idx_{table_name}_hash", table.c.hash_crc32)
-        idx.create(bind=conn, checkfirst=True)
+        conn.execute(text(ddl))
 
-    logger.info(
-        "Tabla %s creada con PK '%s', columna hash_crc32 e índice auxiliar.",
-        table_name,
-        pk_col,
+
+# ────────────────────────────────────────────────────────────────────
+def copy_dataframe(engine: Engine, df, table: str) -> None:
+    """
+    COPY FROM STDIN directamente desde un buffer en memoria, alineando
+    columnas dinámicamente con cada DataFrame.
+    """
+    buf = io.StringIO()
+    df.to_csv(
+        buf,
+        sep="\t",
+        index=False,
+        header=False,
+        na_rep="\\N",
+        quoting=csv.QUOTE_NONE,
+        escapechar="\\",
     )
+    buf.seek(0)
+
+    raw = engine.raw_connection()          # conexión psycopg2 subyacente
+    try:
+        cur = raw.cursor()
+        cur.copy_from(buf, table, sep="\t", null="\\N", columns=list(df.columns))
+        raw.commit()
+        cur.close()
+    finally:
+        raw.close()
 
 
-# ────────────────────────────────────────────────────────────────────────────
-def _pg_type_from_series(series: pd.Series):
-    """Convierte un dtype pandas a un tipo SQLAlchemy simple."""
-    if pd.api.types.is_integer_dtype(series):
-        return Integer
-    if pd.api.types.is_float_dtype(series):
-        return Float
-    if pd.api.types.is_datetime64_any_dtype(series):
-        return DateTime
-    return String  # fallback genérico
-
-
-# ────────────────────────────────────────────────────────────────────────────
-def upsert_dataframe(engine: Engine, df: pd.DataFrame, dst_table_name: str, pk_col: str):
+# ────────────────────────────────────────────────────────────────────
+def merge_from_staging(engine: Engine, stg: str, dst: str, pk: str) -> None:
     """
-    • Añade dinámicamente cualquier columna faltante a `dst_table_name`.
-    • Ejecuta un INSERT ... ON CONFLICT (UPSERT) según `pk_col`.
-
-    Esto permite procesar la tabla por chunks sin fallar si
-    aparecen columnas nuevas en un chunk posterior.
+    Inserta / actualiza sólo las columnas presentes en la staging.
     """
+    insp = inspect(engine)
+    stg_cols = {c["name"] for c in insp.get_columns(stg)}
+    dst_cols = {c["name"] for c in insp.get_columns(dst)}
+    common   = [c for c in stg_cols & dst_cols]
+
+    if pk not in common:
+        raise ValueError(f"La clave primaria «{pk}» no está en {stg}")
+
+    cols_csv   = ", ".join(quote_ident(c) for c in common)
+    select_csv = ", ".join(f's.{quote_ident(c)}' for c in common)
+    update_csv = ", ".join(f'{quote_ident(c)} = EXCLUDED.{quote_ident(c)}'
+                           for c in common if c != pk)
+
+    sql = f"""
+    INSERT INTO {quote_ident(dst)} ({cols_csv})
+    SELECT {select_csv}
+    FROM {quote_ident(stg)} AS s
+    ON CONFLICT ({quote_ident(pk)}) DO UPDATE
+    SET {update_csv};
+    """
+
     with engine.begin() as conn:
-        meta = MetaData()
-        meta.reflect(bind=conn)
-
-        dst = Table(dst_table_name, meta, autoload_with=conn)
-        existing_cols = {c.name for c in dst.columns}
-
-        # ── detectar y crear columnas que falten ───────────────────
-        missing = [c for c in df.columns if c not in existing_cols]
-        for col in missing:
-            col_type = _pg_type_from_series(df[col])
-            logger.info(
-                "Añadiendo columna '%s' (%s) a %s",
-                col,
-                col_type.__name__,
-                dst_table_name,
-            )
-            conn.execute(
-                text(
-                    f'ALTER TABLE "{dst_table_name}" '
-                    f'ADD COLUMN "{col}" {col_type().compile(dialect=conn.dialect)}'
-                )
-            )
-
-        if missing:
-            # refrescamos metadata para que refleje las nuevas columnas
-            meta = MetaData()
-            meta.reflect(bind=conn)
-            dst = Table(dst_table_name, meta, autoload_with=conn)
-
-        # ── construir INSERT … ON CONFLICT ─────────────────────────
-        stmt = pg_insert(dst).values(df.to_dict(orient="records"))
-        update_cols = {
-            c.name: stmt.excluded[c.name] for c in dst.columns if c.name != pk_col
-        }
-
-        conn.execute(
-            stmt.on_conflict_do_update(index_elements=[pk_col], set_=update_cols)
-        )
-        logger.info("UPSERT en %s completado (%s filas).", dst_table_name, len(df))
+        conn.execute(text(sql))

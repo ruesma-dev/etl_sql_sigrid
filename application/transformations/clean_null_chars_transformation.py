@@ -1,59 +1,61 @@
-# application/transformations/clean_null_chars_transformation.py
 from __future__ import annotations
 
-import logging
-from typing import Any, Iterable
-
 import pandas as pd
+from pandas.api.types import is_string_dtype
 
-log = logging.getLogger(__name__)
+# ---------------------------------------------------------------------------
+# Compatibilidad con tu jerarquía de transformaciones
+# ---------------------------------------------------------------------------
+try:
+    # Tu proyecto define la clase BaseTransformation
+    from application.transformations.base_transformation import (
+        BaseTransformation as Transformation,
+    )
+except ImportError:
+    # Fallback en caso de que no exista
+    class Transformation:  # type: ignore
+        def transform(self, df: pd.DataFrame) -> pd.DataFrame: ...
 
-_NULL_CHAR = "\x00"
 
-
-# ────────────────────────────────────────────────────────────────────────────
-def _decode_and_clean(val: Any) -> Any:
+class CleanNullCharsTransformation(Transformation):
     """
-    • Bytes/bytearray/memoryview → str (UTF-8, fallback latin-1).
-    • Si es str, elimina el carácter NUL.
-    • Devuelve el valor sin modificar en cualquier otro caso.
-    """
-    if val is None:
-        return val
-
-    if isinstance(val, (bytes, bytearray, memoryview)):
-        for enc in ("utf-8", "latin-1"):
-            try:
-                val = val.decode(enc, errors="replace")
-                break
-            except Exception:  # pragma: no cover
-                continue
-
-    if isinstance(val, str):
-        return val.replace(_NULL_CHAR, "")
-
-    return val
-
-
-# ────────────────────────────────────────────────────────────────────────────
-class CleanNullCharsTransformation:
-    """
-    Elimina caracteres \\x00 y convierte bytes a texto en las columnas indicadas
-    (o en todas si `columns` es None).
+    • Elimina caracteres NUL (“\\x00”) que a veces llegan en campos texto.
+    • Decodifica columnas con bytes/bytearray → str para poder aplicar `.str`.
+    • Convierte literales que representan nulos (`\\N`, `NaN`, `NaT`, …) en
+      valores nulos reales (`pd.NA`) antes de la carga.
     """
 
-    def __init__(self, columns: Iterable[str] | None = None):
-        self.columns = list(columns) if columns is not None else None
+    # Literales que deben tratarse como NULL
+    NULL_TOKENS = ["NaT", "nat", "NaN", "nan", r"\N", r"\\N"]
 
-    # ---------------------------------------------------------------------#
+    # ------------------------------------------------------------------
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        cols = self.columns or df.columns
+        for col in df.columns:
+            series = df[col]
 
-        for col in cols:
-            if col not in df.columns:
-                continue
+            # 1) Si la serie contiene bytes → str (UTF-8, ignorando errores)
+            if (
+                series.dtype == object
+                and series.apply(lambda v: isinstance(v, (bytes, bytearray))).any()
+            ):
+                df[col] = series.apply(
+                    lambda v: v.decode("utf-8", "ignore")
+                    if isinstance(v, (bytes, bytearray))
+                    else v
+                )
+                series = df[col]  # refrescamos referencia
 
-            # map() evita el uso del accesor .str, tolera None/NA y es seguro
-            df[col] = df[col].map(_decode_and_clean)
+            # 2) Limpiar caracteres NUL en columnas texto
+            if is_string_dtype(series) or series.dtype == object:
+                mask = series.notna()
+                if mask.any():
+                    df.loc[mask, col] = (
+                        series.loc[mask]
+                        .astype(str)
+                        .str.replace("\x00", "", regex=False)
+                    )
+
+        # 3) Sustituir tokens literales por nulos reales
+        df.replace(to_replace=self.NULL_TOKENS, value=pd.NA, inplace=True, regex=False)
 
         return df

@@ -1,9 +1,8 @@
+# application/use_cases/load_use_case.py
 from __future__ import annotations
 
-import io
 import logging
-from typing import Iterable
-
+import io
 import pandas as pd
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
@@ -12,7 +11,8 @@ from application.table_config import TABLE_CONFIG
 from infrastructure.pg_utils import (
     table_exists,
     create_table_with_pk,
-    upsert_dataframe,
+    copy_dataframe,   # util que hace COPY FROM STDIN
+    quote_ident,
 )
 
 log = logging.getLogger(__name__)
@@ -20,71 +20,64 @@ log = logging.getLogger(__name__)
 
 class LoadUseCase:
     """
-    Inserta / upserta DataFrames en PostgreSQL.
+    Estrategia FULL-RELOAD:
 
-    Parámetros
-    ----------
-    pg_engine : Engine
-        Engine SQLAlchemy ya configurado.
-    bulk : bool, default=False
-        • False ⇒ upsert con `INSERT … ON CONFLICT …` (comportamiento original)
-        • True  ⇒ inserción masiva (`COPY FROM STDIN`) **sin upsert**
+    1. Si el DataFrame no tiene filas → TRUNCATE / crea estructura y termina.
+    2. Si no tiene columnas (p.e. todas eliminadas) → omite tabla.
+    3. Para el resto:
+         • DROP TABLE destino
+         • CREATE TABLE
+         • COPY masivo
     """
 
-    def __init__(self, pg_engine: Engine, *, bulk: bool = False) -> None:
-        self.pg_engine = pg_engine
-        self.pg_inspector = inspect(pg_engine)
-        self._bulk = bulk
+    def __init__(self, pg_engine: Engine):
+        self.engine    = pg_engine
+        self.inspector = inspect(pg_engine)
 
-    # ────────────────────────────────────────────────────────────────────
-    def __call__(self, table_key: str, df: pd.DataFrame) -> None:
+    # ------------------------------------------------------------------ #
+    def __call__(self, table_key: str, df: pd.DataFrame):
         cfg = TABLE_CONFIG[table_key]
         dst, pk = cfg["target_table"], cfg["primary_key"]
 
-        # ─── LIMPIEZA NULOS / NaT ──────────────────────────────────────
-        df = df.astype(object)                      # 1) todo object ⇒ None válido
-        df = df.where(pd.notnull(df), None)         # 2) NaN / NaT / pd.NA → None
-        df.replace(                                 # 3) literales 'nan', 'NaT'…
-            to_replace=["NaT", "nat", "NaN", "nan"],
-            value=None,
-            inplace=True,
+        # ─── Sanitizar nulos / tipos ───────────────────────────────────────
+        df = (
+            df.astype(object)
+              .where(df.notnull(), None)
+              .replace(to_replace=["NaT", "nat", "NaN", "nan"], value=None)
         )
 
-        # ─── CREAR TABLA SI NO EXISTE ─────────────────────────────────
-        if not table_exists(self.pg_inspector, dst):
-            create_table_with_pk(self.pg_engine, dst, df, pk)
-            # refrescamos inspector para que conozca la nueva tabla
-            self.pg_inspector = inspect(self.pg_engine)
+        # ─── Caso 0 columnas: nada que crear/cargar ────────────────────────
+        if df.shape[1] == 0:
+            log.warning(
+                "Tabla %s: DataFrame sin columnas tras transformaciones; se omite carga.",
+                dst,
+            )
+            return
 
-        # ─── INSERT / UPSERT ──────────────────────────────────────────
-        if self._bulk:
-            self._copy_dataframe(dst, df)
-            log.info("COPY en %s completado.", dst)
-        else:
-            upsert_dataframe(self.pg_engine, df, dst, pk)
-            log.info("UPSERT en %s completado.", dst)
+        # ─── Caso 0 filas: solo asegurar estructura ───────────────────────
+        if df.empty:
+            if not table_exists(self.inspector, dst):
+                create_table_with_pk(self.engine, dst, df.head(0), pk)
+                self.inspector = inspect(self.engine)
+                log.info("Tabla %s creada vacía (sin datos).", dst)
+            else:
+                with self.engine.begin() as conn:
+                    conn.execute(text(f"TRUNCATE {quote_ident(dst)}"))
+                log.info("Tabla %s truncada (sin datos para cargar).", dst)
+            return
 
-    # ────────────────────────────────────────────────────────────────────
-    #  MÉTODOS AUXILIARES
-    # ────────────────────────────────────────────────────────────────────
-    def _copy_dataframe(self, table: str, df: pd.DataFrame) -> None:
-        """
-        Inserta el DataFrame usando `COPY FROM STDIN` (mucho más rápido
-        que executemany).  No actualiza registros existentes.
-        """
-        buffer = io.StringIO()
-        # TSV: tab como separador, \N como NULL (entendido por PostgreSQL)
-        df.to_csv(buffer, index=False, header=False, sep="\t", na_rep="\\N")
-        buffer.seek(0)
+        # ─── FULL-RELOAD normal ───────────────────────────────────────────
+        # 1. DROP existente
+        if table_exists(self.inspector, dst):
+            with self.engine.begin() as conn:
+                conn.execute(text(f"DROP TABLE IF EXISTS {quote_ident(dst)} CASCADE"))
+            self.inspector = inspect(self.engine)
 
-        # Conexión en bruto para usar copy_from
-        with self.pg_engine.raw_connection() as raw_conn:
-            with raw_conn.cursor() as cur:
-                cur.copy_from(
-                    buffer,
-                    table,              # tabla destino
-                    sep="\t",
-                    null="\\N",
-                    columns=list(df.columns),
-                )
-            raw_conn.commit()
+        # 2. CREATE nueva con PK
+        create_table_with_pk(self.engine, dst, df.head(0), pk)
+        self.inspector = inspect(self.engine)
+
+        # 3. COPY masivo
+        copy_dataframe(self.engine, df, dst)
+
+        log.info("FULL-RELOAD en %s completado (%s filas).", dst, len(df))
