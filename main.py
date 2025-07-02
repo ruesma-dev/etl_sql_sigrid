@@ -35,7 +35,9 @@ TABLES: list[str] = [
     "obrfasamb", "hmo", "hmores", "obrfas", "auxobramb",
     "obrparpre",
     "tar", "dcf", "dcfpro",
-    "cli", "pro", "cob", "dvf", "dvfpro",
+    "cli",
+    "pro"
+    , "cob", "dvf", "dvfpro",
     "obr", "obrctr", "obrparpar", "cen", "con",
     "auxobrtip", "auxobrcla", "conest",
     "dca", "ctr", "dcapro", "dcaproana", "dcaprodes",

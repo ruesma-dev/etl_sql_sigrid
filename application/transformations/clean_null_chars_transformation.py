@@ -26,7 +26,7 @@ class CleanNullCharsTransformation(Transformation):
     """
 
     # Literales que deben tratarse como NULL
-    NULL_TOKENS = ["NaT", "nat", "NaN", "nan", r"\N", r"\\N"]
+    NULL_TOKENS = ["NaT", "nat", "NaN", "nan", r"\N", r"\\N", "\\N"]
 
     # ------------------------------------------------------------------
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
